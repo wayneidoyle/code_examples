@@ -1,0 +1,175 @@
+# Example snakemake file based off the official tutorial at https://snakemake.readthedocs.io/en/stable/tutorial/basics.html
+# Edited to include my own notes and comments
+
+# Invocation
+#   snakemake [value]
+#       value is not needed if all rules are being invoked
+#           snakemake
+#       value can be the name of a rule if wildcards are not needed
+#           snakemake plot_quals
+#       value can be the name of outputs if wildcards are needed
+#           snakemake mapped_reads/{A,B}.bam
+
+
+# General comments
+#   1) Snakemake will apply rules top-down
+#   2) Each application of a rule is  ajob
+#   3) For each input file of a job, Snakemake detemrines what rules are needed. Leading to the creation of a directed acylic graph (DAG)
+#   4) On the DAG, jobs are nodes and edges are dependencies
+#   5) Jobs are only be rerun if one of the input files is newer than one of the output files or if an input file would be updated by running the code
+#   6) Snakemake will create all necessary directories before a job executes
+#   7) Since Snakemake uses braces {} for wildcards, if you want to use braces in a whell command they have to be escaped by doubling {{}}
+#   8) Snakemake works backwards from the desired output, not from all possible inputs
+#   9) Aside from the first rule being the target, the order of the remaining rules does not matter
+#   10) adding the flag --cores [#] specifies the number of threads available to Snakemake
+#       Snakemake will ensure that the sum of all threads across all jobs does not exceed this
+#   11) --forceall allows all rules to be rerun
+#   12) Snakemake runs in three phases:
+#       i) Initialization: files defining the workflow are parsed and all rules are instantiated
+#           expands are done in this phase
+#       ii) DAG: the DAG is built by filling wildcards and matching input files to output files
+#           wildcards are done in this phase
+#       iii) Scheduling: DAG of jobs is executed, with jobs started according to the available resources
+#   13) Snakemake will not rerun jobs if inputs are updated, this can be triggered with the following command:
+#        snakemake -n --forcerun $(snakemake --list-input-changes)
+
+
+# Best practices
+#   1) Run snakemake with the flags -np to do a dry run and print what would be run
+#   2) Have outputs go into unique subfolders so Snakemake can effectively determine what rules are needed for the requested input
+#   3) The DAG can be visualized with flag --dag and passing to the function dot
+#       Example from the result of samtools index: snakemake --dag sorted_reads/{A,B}.bam.bai | dot -Tsvg > dag.svg
+#   4) Use script instead of shell whenever working with more than a few lines of code
+#   5) A rule all on the top of the script to ensure the order of operations is correct
+#   6) Store all log files in a logs directory, with subdirectories prefixed by the rule or tool name
+
+# Manual specification samples used as inputs
+#   This is an example from the tutorial, a config file is used instead
+#   If used, config["samples"] would need to be replaced with SAMPLES in bcftools_call 
+#SAMPLES = ["A","B"]
+
+# Specify config file for running Snakefile
+# This file is read and values are stored in a dictionary called config
+configfile: "config.yaml"
+
+rule all:
+    # The first rule is by default the target
+    # rule all tells Snakemake that the specified input is the goal
+    # If not provided the first listed rule will become the target
+    input:
+        # inputs are desired outputs of the pipeline once complete
+        "plots/quals.svg"
+
+def get_bwa_map_input_fastqs(wildcards):
+    # Expand wildcards from configuration file
+    # Necessary to get wildcards during DAG phase
+    # This is an input function, input functions by default take a single input (wildcards object)
+    # Input functions have to return a string or list of strings (interpreted as path to input files)
+    return config["samples"][wildcards.sample]
+
+rule bwa_map:
+    # Runs mapping using BWA
+    # 
+    input:
+        # This is a list of expected file inputs (needs commas between items since Python is concatenating)
+        # Function gets wildcards that match {sample} in outputs
+        "data/genome.fa",
+        get_bwa_map_input_fastqs
+    output:
+        # This is a list of expected outputs (needs commas between items)
+        # {sample} ensures that the inputs and outputs are matched
+        # All output files must have the same wildcards (avoids writing to the same file in parallel)
+        # temp tells Snakemake that these are temporary files and can be deleted once all rules requiring them as input are completed 
+        temp("mapped_reads/{sample}.bam")
+    params:
+        # Specify arbritrary parameters for Shell commands based off wildcards
+        # Values will be stored in a params object
+        # Can take functions to delay intializiation of DAG phase (like input function above)
+        #   Arguments can include input, output, threads, and resources
+        rg=r"@RG\tID:{sample}\tSM:{sample}"
+    log:
+        # Allows logging specific to a given job
+        # Not cleaned up if a job fails 
+        # Must contain same wildcards as output files to avoid name clashes
+        "logs/bwa_mem/{sample}.log"
+    threads: 8 # Sets property for number of threads to use for shell command. If not set defaults to 1
+    shell:
+        # This is a shell command to execute
+        # {input} grabs all input files and then submits them as a comma delimited string
+        #   In this case {fasta, fastq}
+        # {output} will save the output into the file listed in the output section above
+        # {threads} uses threads property to specify number of threads for mapping
+        # Parentheses and 2> are to pipe STDERR of all tools into the log file
+        "(bwa mem -R '{params.rg}' -t {threads} {input} | "
+        "samtools view -Sb - > {output}) 2> {log}"
+
+rule samtools_sort:
+    # Sorts BAM file output from bwa_map
+    input:
+        #Input is the output of bwa_map so this will run after
+        "mapped_reads/{sample}.bam"
+    output:
+        # protected tells Snakemake to prevent the file from being accidentally deleted or modified
+        # useful since file is computationally expensive to create
+        protected("sorted_reads/{sample}.bam")
+    shell:
+        # This is a single shell command but spread across multiple lines for legibility
+        #   To do this we must have a white space at the end of each line (except last)
+        #   This ensures that there is proper spacing when Python concatenates all strings
+        # wildards.sample is used to get wildcard from bwa_map
+        "samtools sort -T sorted_reads/{wildcards.sample} "
+        "-O bam {input} > {output}"
+
+rule samtools_index:
+    # Indexes sorted BAM file ouput from samtools_sort
+    input:
+        "sorted_reads/{sample}.bam"
+    output:
+        "sorted_reads/{sample}.bam.bai"
+    shell:
+        "samtools index {input}"
+
+rule bcftools_call:
+    # Call variants
+    input:
+        # Expand makes a list of matches files by parsing input lists
+        # This is helpful if multiple values need to feed into the input file name
+        # Example:
+        #   expand("sorted_reads/{sample}.{replicate}.bam", sample=SAMPLES, replicate=[0, 1])
+        #   ["sorted_reads/A.0.bam", "sorted_reads/A.1.bam", "sorted_reads/B.0.bam", "sorted_reads/B.1.bam"]
+        # SAMPLES is coming from the top of the file
+        # Specifically doing named inputs (example fa or bam) for legibility, but unnamed inputs can also be provided
+        #   If mixing named and unnamed, the unnamed must come first (like in a Python function)
+        #   Unnamed are considered positional inputs, their order is preserved in {input}
+        #   Named are not positional and their order is not preserved in {input}
+        fa="data/genome.fa",
+        bam=expand("sorted_reads/{sample}.bam", sample=config["samples"]),
+        bai=expand("sorted_reads/{sample}.bam.bai", sample=config["samples"])
+    output:
+        "calls/all.vcf"
+    params:
+        # Read config file to get parameter for prior mutation rate
+        rate=config["prior_mutation_rate"]
+    log:
+        "logs/bcftools_call/all.log"
+    shell:
+        # Inputs are put into an object (inputs) and specific ones are selected with dot nomenclature
+        "(bcftools mpileup -f {input.fa} {input.bam} | "
+        "bcftools call -mv -P {params.rate} - > {output}) 2> {log}"
+
+
+rule plot_quals:
+    # Plot histogram of quality scores
+    input:
+        "calls/all.vcf"
+    output:
+        "plots/quals.svg"
+    script:
+        # script specifies that a Python script should be invoked rather than a Shell command
+        # Script paths are always relative to the Snakefile (i.e., this file)
+        # Another benefit of using scripts is that the inputs are always the same (snakemake object), so command args are not needed
+        #   Python: Object called snakemake with attributes for each propery
+        #      Example accession of the input: snakemake.input[0]
+        #   R: S4 object with attributes that are lists
+        #       Example accession of the input: snakemake@input[[1]]
+        "scripts/plot-quals.py"
