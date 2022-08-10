@@ -32,7 +32,8 @@
 #       iii) Scheduling: DAG of jobs is executed, with jobs started according to the available resources
 #   13) Snakemake will not rerun jobs if inputs are updated, this can be triggered with the following command:
 #        snakemake -n --forcerun $(snakemake --list-input-changes)
-
+#   14) Modules can be added with include: "path/to/other.snakefile"
+#   15) Pre-existing Snakemake wrappers can be found at https://snakemake-wrappers.readthedocs.io/ and invoked with "wrapper" instead of "shell"
 
 # Best practices
 #   1) Run snakemake with the flags -np to do a dry run and print what would be run
@@ -42,6 +43,7 @@
 #   4) Use script instead of shell whenever working with more than a few lines of code
 #   5) A rule all on the top of the script to ensure the order of operations is correct
 #   6) Store all log files in a logs directory, with subdirectories prefixed by the rule or tool name
+#   7) Run "snakemake --lint" in a directory with a Snakefile to examine the code for issues before moving to production
 
 # Manual specification samples used as inputs
 #   This is an example from the tutorial, a config file is used instead
@@ -92,6 +94,10 @@ rule bwa_map:
         # Not cleaned up if a job fails 
         # Must contain same wildcards as output files to avoid name clashes
         "logs/bwa_mem/{sample}.log"
+    benchmark:
+        # Save wall clock time and memory usage to a file
+        # All wild cards must be in outputs too
+        "benchmarks/{sample}.bwa.benchmark.txt"
     threads: 8 # Sets property for number of threads to use for shell command. If not set defaults to 1
     shell:
         # This is a shell command to execute
@@ -126,6 +132,15 @@ rule samtools_index:
         "sorted_reads/{sample}.bam"
     output:
         "sorted_reads/{sample}.bam.bai"
+    conda:
+        # Set conda environments for rules
+        # yaml file should specify conda dependencies
+        # This will create the conda environemnt on the fly to ensure proper versioning
+        # Best practice is to specify major and minor software versions in yaml file
+        # Benefits are logging of software versioning and enables code to be run automatically without sudo permissions
+        # Requires that the flag "--use-conda" is passed on the command line
+        # Can't be used if "run" is used instead of "shell" to invoke Python code
+        "envs/samtools.yaml"
     shell:
         "samtools index {input}"
 
